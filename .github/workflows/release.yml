@@ -9,6 +9,7 @@ jobs:
   release:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
 
@@ -27,8 +28,6 @@ jobs:
 
       - name: Build Application
         run: npm run dist
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v1
