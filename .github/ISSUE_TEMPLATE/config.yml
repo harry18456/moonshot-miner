@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security Vulnerabilities
-    url: https://github.com/harry18456/moonshot/blob/main/SECURITY.md
+    url: https://github.com/harry18456/moonshot-miner/blob/main/SECURITY.md
     about: Please refrain from reporting security vulnerabilities here.

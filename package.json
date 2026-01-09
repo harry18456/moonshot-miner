@@ -1,6 +1,10 @@
 {
-  "name": "moonshot",
-  "version": "1.0.6",
+  "name": "moonshot-miner",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/harry18456/moonshot-miner.git"
+  },
+  "version": "1.0.7",
   "description": "A cross-platform Bitcoin solo miner",
   "main": "main.js",
   "scripts": {
@@ -8,7 +12,7 @@
     "dist": "electron-builder"
   },
   "keywords": [],
-  "author": "Antigravity",
+  "author": "harry18456",
   "license": "MIT",
   "type": "commonjs",
   "dependencies": {
@@ -34,6 +38,26 @@
       "target": "AppImage",
       "icon": "icon.png",
       "category": "Utility"
+    },
+    "files": [
+      "**/*",
+      "!**/*.ts",
+      "!*.map",
+      "!package-lock.json",
+      "!dist",
+      "!node_modules",
+      "node_modules",
+      "!build_helper.bat",
+      "!.git",
+      "!.github",
+      "!*.md",
+      "!LICENSE",
+      "!mk_cache"
+    ],
+    "compression": "maximum",
+    "asar": true,
+    "directories": {
+      "output": "dist"
     }
   }
 }
