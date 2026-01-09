@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Cross-Platform Support**: Detailed build instructions for macOS and Linux.
 - **MIT License**: Open-sourced the project under the MIT License.
+- **English README**: Added full English documentation and language toggle.
 - **Community Standards**: Added CONTRIBUTING.md, CODE_OF_CONDUCT.md, and SECURITY.md.
 - **Vibe Coding Attribution**: Acknowledged the AI-assisted development process.
 
@@ -17,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refined `README.md` with detailed settings documentation and a more colloquial probability disclaimer.
 - Improved `.gitignore` patterns for better development hygiene.
 
-## [1.0.0] - 2026-01-07
+## [1.0.0] - 2026-01-09
 
 ### Added
 - **Solo Mining**: Real Stratum protocol implementation for solo.ckpool.org.
