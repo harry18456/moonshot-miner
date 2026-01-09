@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Moonshot Miner</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="title">Moonshot 🚀</div>
+            <div class="status-indicator" id="status-text">IDLE</div>
+        </div>
+
+        <div class="stats">
+            <div class="stat-item">
+                <span class="label">Speed</span>
+                <span class="value" id="hashrate">0 H/s</span>
+            </div>
+            <!-- <div class="stat-item">
+                <span class="label">Shares</span>
+                <span class="value">0</span>
+            </div> -->
+        </div>
+
+        <div class="controls">
+            <button id="toggle-mining-btn" class="btn primary">Start Mining</button>
+            <button id="settings-btn" class="btn icon">⚙️</button>
+        </div>
+
+        <div class="settings-panel hidden" id="settings-panel">
+            <div class="input-group">
+                <label>BTC Wallet Address</label>
+                <input type="text" id="wallet-address" placeholder="1A1zP1eP...">
+            </div>
+            <div class="input-group">
+                <label for="intensity">Intensity (Sleep ms): <span id="intensity-val">100</span></label>
+                <input type="range" id="intensity" min="1" max="1000" step="10" value="100">
+            </div>
+            <div class="input-group" style="display: flex; align-items: center; gap: 8px;">
+                <input type="checkbox" id="minimal-mode" style="width: auto;">
+                <label for="minimal-mode" style="margin: 0; cursor: pointer;">Minimal Mode (Hide Hashrate)</label>
+            </div>
+            <div class="input-group" style="display: flex; align-items: center; gap: 8px;">
+                <input type="checkbox" id="auto-start" style="width: auto;">
+                <label for="auto-start" style="margin: 0; cursor: pointer;">Auto Mine (Start logic on app
+                    launch)</label>
+            </div>
+            <div class="input-group" style="display: flex; align-items: center; gap: 8px;">
+                <input type="checkbox" id="open-at-login" style="width: auto;">
+                <label for="open-at-login" style="margin: 0; cursor: pointer;">Run on Windows Startup</label>
+            </div>
+            <button id="save-config-btn" class="btn primary" style="width: 100%; margin-top: 10px;">Save &
+                Apply</button>
+            <div style="text-align: center; margin-top: 10px; font-size: 0.8em; opacity: 0.7;">
+                v<span id="app-version">...</span>
+            </div>
+        </div>
+    </div>
+    <script src="renderer.js"></script>
+</body>
+
+</html>

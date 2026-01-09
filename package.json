@@ -1,0 +1,30 @@
+{
+  "name": "moonshot",
+  "version": "1.0.6",
+  "description": "A cross-platform Bitcoin solo miner",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "keywords": [],
+  "author": "Antigravity",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "electron-store": "^11.0.2"
+  },
+  "devDependencies": {
+    "electron": "^39.2.7",
+    "electron-builder": "^26.4.0"
+  },
+  "build": {
+    "appId": "com.moonshot.miner",
+    "productName": "Moonshot Miner",
+    "win": {
+      "target": "nsis",
+      "icon": "icon.png"
+    }
+  }
+}
