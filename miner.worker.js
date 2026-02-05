@@ -173,7 +173,6 @@ function handleMessage(msg) {
 
     // Handle share submission response (id >= 100)
     if (msg.id >= 100 && pendingShares.has(msg.id)) {
-        const share = pendingShares.get(msg.id);
         pendingShares.delete(msg.id);
 
         if (msg.result === true) {
@@ -187,19 +186,7 @@ function handleMessage(msg) {
                 type: 'error',
                 payload: `Share rejected: ${errorMsg}`
             });
-
-            // Retry up to 3 times if it's a network-related error
-            if (share.retryCount < 3 && errorMsg.includes('timeout')) {
-                setTimeout(() => {
-                    submitShare(
-                        share.jobId,
-                        share.en2Int,
-                        share.ntime,
-                        share.nonceInt,
-                        share.retryCount + 1
-                    );
-                }, 1000 * (share.retryCount + 1));
-            }
+            // Note: No retry for rejected shares - typically stale/duplicate/invalid
         }
     }
 
@@ -353,15 +340,13 @@ function mine() {
     const batchSize = 10000;
     // If intensity is high (long sleep), we do a burst then sleep.
 
-    let found = false;
-    let currentNonce = 0; // In a real miner we'd randomize or track this better.
-
-    // Use a random start nonce for every batch to avoid repeating 0-10000 endlessly if we re-enter 'mine' fast
-    currentNonce = Math.floor(Math.random() * 0xFFFFFFFF);
+    let hashCount = 0;
+    let currentNonce = Math.floor(Math.random() * 0xFFFFFFFF);
 
     const start = Date.now();
 
     for (let i = 0; i < batchSize; i++) {
+        hashCount++;
         // Write Nonce (LE)
         header.writeUInt32LE(currentNonce, 76);
 
@@ -375,7 +360,6 @@ function mine() {
 
         if (hashNum <= currentTarget) {
             // FOUND A SHARE!
-            found = true;
             submitShare(currentJob.jobId, extraNonce2, currentJob.ntime, currentNonce);
             // Increment extraNonce2 to generate new coinbase for next search
             // Handle overflow based on extraNonce2Size (max value is 2^(size*8) - 1)
@@ -390,9 +374,9 @@ function mine() {
 
     const end = Date.now();
 
-    // Report Hashrate
+    // Report Hashrate (use actual hash count, not batchSize)
     const duration = end - start;
-    const hashrate = Math.floor((batchSize / (duration || 1)) * 1000);
+    const hashrate = Math.floor((hashCount / (duration || 1)) * 1000);
     parentPort.postMessage({ type: 'hashrate', payload: hashrate });
 
     // Increment ExtraNonce2 occasionally if we exhaust nonces? 
@@ -404,7 +388,7 @@ function mine() {
     setTimeout(mine, intensity || 100);
 }
 
-function submitShare(jobId, en2Int, ntime, nonceInt, retryCount = 0) {
+function submitShare(jobId, en2Int, ntime, nonceInt) {
     // Format hex strings
     // extraNonce2: Hex string, padded
     const en2Hex = en2Int.toString(16).padStart(extraNonce2Size * 2, '0');
@@ -418,15 +402,8 @@ function submitShare(jobId, en2Int, ntime, nonceInt, retryCount = 0) {
 
     const shareId = shareIdCounter++;
 
-    // Store for retry if needed
-    pendingShares.set(shareId, {
-        jobId,
-        en2Int,
-        ntime,
-        nonceInt,
-        retryCount,
-        timestamp: Date.now()
-    });
+    // Store to track response
+    pendingShares.set(shareId, { timestamp: Date.now() });
 
     const submitReq = {
         id: shareId,
