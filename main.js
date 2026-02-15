@@ -21,6 +21,12 @@ let mainWindow = null;
 let tray = null;
 let minerWorker = null;
 
+function sendToRenderer(channel, payload) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(channel, payload);
+    }
+}
+
 // Set App User Model ID for Windows Notifications
 app.setAppUserModelId('com.moonshot.miner');
 
@@ -112,7 +118,7 @@ function startMiner() {
 
     const config = store.get('config');
     if (!config.walletAddress) {
-        mainWindow.webContents.send('status-update', { state: 'ERROR', message: 'No Wallet Address' });
+        sendToRenderer('status-update', { state: 'ERROR', message: 'No Wallet Address' });
         return;
     }
 
@@ -127,52 +133,52 @@ function startMiner() {
                 tray.setToolTip(`Moonshot Miner: MINING (${msg.payload})`);
             }
         } else {
-            console.log('Worker Message:', msg);
             // Forward msg to Renderer
-            if (mainWindow) {
-                if (msg.type === 'status') {
-                    // If the payload contains "Running" or "Authorized", we consider it MINING state
-                    let state = 'CONNECTING';
-                    if (msg.payload.includes('Running') || msg.payload.includes('Authorized')) {
-                        state = 'MINING';
-                    } else if (msg.payload.includes('Connected')) {
-                        state = 'CONNECTING';
-                    }
-
-                    // Update Tray Tooltip
-                    if (tray && !tray.isDestroyed()) {
-                        tray.setToolTip(`Moonshot Miner: ${state}`);
-                    }
-
-                    // Send explicit status update for UI state logic
-                    mainWindow.webContents.send('status-update', { state: state });
-                } else if (msg.type === 'error') {
-                    if (tray && !tray.isDestroyed()) tray.setToolTip(`Moonshot Miner: ERROR`);
-                    mainWindow.webContents.send('status-update', { state: 'ERROR', message: msg.payload });
-                } else if (msg.type === 'share') {
-                    if (tray && !tray.isDestroyed()) tray.setToolTip(`Moonshot Miner: SUBMITTED`);
-                    mainWindow.webContents.send('status-update', { state: 'SHARE', message: msg.payload });
-
-                    new Notification({
-                        title: 'Moonshot Miner',
-                        body: `🎉 ${msg.payload}`,
-                        icon: path.join(__dirname, 'icon.png')
-                    }).show();
+            if (msg.type === 'status') {
+                // If the payload contains "Running" or "Authorized", we consider it MINING state
+                let state = 'CONNECTING';
+                if (msg.payload.includes('Running') || msg.payload.includes('Authorized')) {
+                    state = 'MINING';
+                } else if (msg.payload.includes('Connected')) {
+                    state = 'CONNECTING';
                 }
+
+                // Update Tray Tooltip
+                if (tray && !tray.isDestroyed()) {
+                    tray.setToolTip(`Moonshot Miner: ${state}`);
+                }
+
+                sendToRenderer('status-update', { state: state });
+            } else if (msg.type === 'error') {
+                if (tray && !tray.isDestroyed()) tray.setToolTip(`Moonshot Miner: ERROR`);
+                sendToRenderer('status-update', { state: 'ERROR', message: msg.payload });
+            } else if (msg.type === 'share') {
+                if (tray && !tray.isDestroyed()) tray.setToolTip(`Moonshot Miner: SUBMITTED`);
+                sendToRenderer('status-update', { state: 'SHARE', message: msg.payload });
+
+                new Notification({
+                    title: 'Moonshot Miner',
+                    body: `🎉 ${msg.payload}`,
+                    icon: path.join(__dirname, 'icon.png')
+                }).show();
+            } else if (msg.type === 'share_rejected') {
+                sendToRenderer('status-update', { state: 'ERROR', message: msg.payload });
+
+                new Notification({
+                    title: 'Moonshot Miner',
+                    body: `⚠️ ${msg.payload}`,
+                    icon: path.join(__dirname, 'icon.png')
+                }).show();
             }
         }
 
         // Still forward raw message for other uses (hashrate)
-        if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('worker-message', msg);
-        }
+        sendToRenderer('worker-message', msg);
     });
 
     minerWorker.on('error', (err) => {
         console.error('Worker error:', err);
-        if (mainWindow) {
-            mainWindow.webContents.send('status-update', { state: 'ERROR', message: err.message });
-        }
+        sendToRenderer('status-update', { state: 'ERROR', message: err.message });
         stopMiner();
     });
 
@@ -181,10 +187,10 @@ function startMiner() {
             console.error(`Worker stopped with exit code ${code}`);
         }
         minerWorker = null;
-        if (mainWindow) mainWindow.webContents.send('status-update', { state: 'IDLE' });
+        sendToRenderer('status-update', { state: 'IDLE' });
     });
 
-    if (mainWindow) mainWindow.webContents.send('status-update', { state: 'CONNECTING' });
+    sendToRenderer('status-update', { state: 'CONNECTING' });
 }
 
 function stopMiner() {
@@ -192,13 +198,11 @@ function stopMiner() {
         minerWorker.terminate();
         minerWorker = null;
     }
-    if (mainWindow) mainWindow.webContents.send('status-update', { state: 'IDLE' });
+    sendToRenderer('status-update', { state: 'IDLE' });
 }
 
 function updateConfig(newConfig) {
-    console.log('Update Config called with:', newConfig);
     store.set('config', newConfig);
-    console.log('Store updated. New config in store:', store.get('config'));
 
     // Broadcast new config to all windows if needed
     if (mainWindow) {

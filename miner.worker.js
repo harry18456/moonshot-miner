@@ -14,6 +14,8 @@ let extraNonce2Size = null;
 let extraNonce2 = 0;
 let isMining = false;
 let difficulty = 1;
+let reconnectTimer = null;
+let isReconnecting = false;
 
 // Pending shares for retry (must be defined before use in handleMessage)
 const pendingShares = new Map();
@@ -61,13 +63,27 @@ function swapEndian32(buffer) {
 // --- CORE MINING LOGIC ---
 
 function updateTarget() {
-    // Ensure difficulty is at least 1 (handles <= 0 and fractional < 1)
-    if (!difficulty || difficulty < 1) difficulty = 1;
+    // Ensure difficulty is positive
+    if (!difficulty || difficulty <= 0) difficulty = 1;
     // Calculate new target based on difficulty.
     // target = diff_1_target / difficulty
-    // We use BigInt division (floor difficulty to avoid division by zero).
-    const diffInt = Math.max(1, Math.floor(difficulty));
-    currentTarget = CNT_MAX_TARGET / BigInt(diffInt);
+    // To support fractional difficulty, multiply first then divide to maintain BigInt precision.
+    // E.g., difficulty 0.5 → target = CNT_MAX_TARGET * 1000 / 500
+    const scale = 1000000;
+    const scaledDiff = Math.max(1, Math.round(difficulty * scale));
+    const computed = (CNT_MAX_TARGET * BigInt(scale)) / BigInt(scaledDiff);
+    // Clamp to max valid 256-bit hash value
+    const MAX_HASH = (1n << 256n) - 1n;
+    currentTarget = computed > MAX_HASH ? MAX_HASH : computed;
+}
+
+function scheduleReconnect() {
+    if (reconnectTimer || isReconnecting) return;
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        isReconnecting = true;
+        connect();
+    }, 5000);
 }
 
 function connect() {
@@ -84,6 +100,7 @@ function connect() {
     socket.setEncoding('utf8');
 
     socket.connect(POOL_PORT, POOL_HOST, () => {
+        isReconnecting = false;
         parentPort.postMessage({ type: 'status', payload: 'Connected' });
 
         const subscribeReq = {
@@ -113,8 +130,9 @@ function connect() {
     });
 
     socket.on('error', (err) => {
+        isMining = false;
         parentPort.postMessage({ type: 'error', payload: err.message });
-        setTimeout(connect, 5000);
+        scheduleReconnect();
     });
 
     socket.on('close', () => {
@@ -122,7 +140,7 @@ function connect() {
         isMining = false;
         // Clear pending shares on disconnect (jobs are now stale)
         pendingShares.clear();
-        setTimeout(connect, 5000);
+        scheduleReconnect();
     });
 }
 
@@ -183,10 +201,9 @@ function handleMessage(msg) {
         } else {
             const errorMsg = msg.error ? (msg.error[1] || msg.error) : 'Unknown error';
             parentPort.postMessage({
-                type: 'error',
-                payload: `Share rejected: ${errorMsg}`
+                type: 'share_rejected',
+                payload: `✗ Share REJECTED: ${errorMsg} (id: ${msg.id})`
             });
-            // Note: No retry for rejected shares - typically stale/duplicate/invalid
         }
     }
 
@@ -363,7 +380,9 @@ function mine() {
             submitShare(currentJob.jobId, extraNonce2, currentJob.ntime, currentNonce);
             // Increment extraNonce2 to generate new coinbase for next search
             // Handle overflow based on extraNonce2Size (max value is 2^(size*8) - 1)
-            const maxExtraNonce2 = Math.pow(2, extraNonce2Size * 8) - 1;
+            // Cap to 6 bytes (2^48) to stay within JS safe integer range
+            const safeSize = Math.min(extraNonce2Size, 6);
+            const maxExtraNonce2 = Math.pow(2, safeSize * 8) - 1;
             extraNonce2 = (extraNonce2 + 1) % (maxExtraNonce2 + 1);
             // Break to recalculate merkle root with new extraNonce2
             break;
@@ -404,6 +423,14 @@ function submitShare(jobId, en2Int, ntime, nonceInt) {
 
     // Store to track response
     pendingShares.set(shareId, { timestamp: Date.now() });
+
+    // Cleanup stale pending shares (older than 60s)
+    const now = Date.now();
+    for (const [id, share] of pendingShares) {
+        if (now - share.timestamp > 60000) {
+            pendingShares.delete(id);
+        }
+    }
 
     const submitReq = {
         id: shareId,

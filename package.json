@@ -4,7 +4,7 @@
     "type": "git",
     "url": "git+https://github.com/harry18456/moonshot-miner.git"
   },
-  "version": "1.0.9",
+  "version": "1.1.0",
   "description": "A cross-platform Bitcoin solo miner",
   "main": "main.js",
   "scripts": {
