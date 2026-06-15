@@ -21,14 +21,10 @@ const statsEl = document.querySelector('.stats');
 document.addEventListener('DOMContentLoaded', async () => {
     try {
         const config = await window.api.getConfig();
-        console.log('Renderer received config:', config);
-        // FIXME: Remove this alert after debugging
-        // alert('Debug: Config Loaded: ' + JSON.stringify(config)); 
 
         if (config) {
             if (walletInput) {
                 walletInput.value = config.walletAddress || '';
-                if (!walletInput.value) console.error('Wallet address empty in config!', config);
             } else {
                 console.error('Wallet Input element not found!');
             }
@@ -64,7 +60,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             // Auto Execute if Configured
             if (config.walletAddress && config.autoStart) {
-                console.log('Auto-starting miner...');
                 window.api.startMiner();
             }
         }
@@ -149,6 +144,7 @@ window.api.onStatusUpdate((data) => {
 
     statusText.innerText = state;
     statusText.className = 'status-indicator'; // reset
+    statusText.title = '';
 
     if (state === 'MINING' || state === 'CONNECTING' || state === 'SHARE') {
         isMining = true;
@@ -163,7 +159,9 @@ window.api.onStatusUpdate((data) => {
         toggleBtn.classList.remove('active');
         if (state === 'ERROR') {
             statusText.classList.add('error');
-            if (message) alert(message);
+            // Non-blocking: show the detail as a tooltip instead of a modal alert,
+            // which would otherwise stack up during reconnect / share-reject bursts.
+            if (message) statusText.title = message;
         }
     }
 
@@ -180,8 +178,7 @@ window.api.onStatusUpdate((data) => {
             }
         }, 1500);
 
-        // Optional: Maybe show a toast or log it
-        console.log('Share result:', message);
+        // Share result is reflected in the status indicator above.
     }
 });
 

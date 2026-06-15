@@ -1,6 +1,7 @@
-const { app, BrowserWindow, Tray, Menu, ipcMain, screen, Notification } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, screen, Notification, nativeImage, session, dialog } = require('electron');
 const path = require('path');
 const { Worker } = require('worker_threads');
+const { sanitizeConfig, isPlausibleBtcAddress } = require('./config-validation');
 require('dotenv').config();
 
 app.name = 'MoonshotMiner';
@@ -8,18 +9,33 @@ app.name = 'MoonshotMiner';
 app.commandLine.appendSwitch('disable-gpu-shader-disk-cache');
 app.commandLine.appendSwitch('disable-http-cache');
 
+// Set App User Model ID for Windows Notifications
+app.setAppUserModelId('com.moonshot.miner');
+
+// Last-resort safety net: surface unexpected throws/rejections instead of the
+// process dying with output only on a console the packaged user never sees.
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught exception:', err);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('Unhandled rejection:', reason);
+});
 
 let store;
 
-// Default Config
+// Default Config (full shape so a persisted config never has missing fields).
 const DEFAULT_CONFIG = {
     walletAddress: process.env.WALLET_ADDRESS || '',
-    intensity: 100 // sleep time in ms
+    intensity: 100, // sleep time in ms
+    minimalMode: false,
+    autoStart: false,
+    openAtLogin: false
 };
 
 let mainWindow = null;
 let tray = null;
 let minerWorker = null;
+let isQuitting = false;
 
 function sendToRenderer(channel, payload) {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -27,10 +43,15 @@ function sendToRenderer(channel, payload) {
     }
 }
 
-// Set App User Model ID for Windows Notifications
-app.setAppUserModelId('com.moonshot.miner');
-
-let isQuitting = false;
+// Minimal in-memory fallback if electron-store fails to initialize (corrupt or
+// locked config.json) so the app still launches with defaults.
+function createMemoryStore(initial) {
+    const data = { ...initial };
+    return {
+        get: (key) => data[key],
+        set: (key, value) => { data[key] = value; }
+    };
+}
 
 function createMainWindow() {
     const { width, height } = screen.getPrimaryDisplay().workAreaSize;
@@ -48,12 +69,21 @@ function createMainWindow() {
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             nodeIntegration: false,
-            contextIsolation: true
+            contextIsolation: true,
+            sandbox: true
         },
         show: false
     });
 
     mainWindow.loadFile('index.html');
+
+    // Lock the renderer to the local app: never navigate away or open popups.
+    mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    mainWindow.webContents.on('will-navigate', (event, url) => {
+        if (url !== mainWindow.webContents.getURL()) {
+            event.preventDefault();
+        }
+    });
 
     mainWindow.on('close', (event) => {
         if (!isQuitting) {
@@ -69,9 +99,30 @@ function createMainWindow() {
 }
 
 function createTray() {
-    // Check if icon exists, otherwise handle gracefully or use default
     const iconPath = path.join(__dirname, 'icon.png');
-    tray = new Tray(iconPath);
+
+    // Load the icon defensively: new Tray() throws on a missing/unreadable icon
+    // (AV lock, partial install), which would otherwise abort startup with no UI.
+    let trayImage;
+    try {
+        trayImage = nativeImage.createFromPath(iconPath);
+        if (trayImage.isEmpty()) {
+            trayImage = nativeImage.createEmpty();
+        }
+    } catch (err) {
+        console.error('Failed to load tray icon:', err);
+        trayImage = nativeImage.createEmpty();
+    }
+
+    try {
+        tray = new Tray(trayImage);
+    } catch (err) {
+        console.error('Failed to create tray, falling back to window:', err);
+        // Degrade gracefully: at least show the window so the app is usable.
+        if (!mainWindow) createMainWindow();
+        if (mainWindow) mainWindow.show();
+        return;
+    }
 
     const contextMenu = Menu.buildFromTemplate([
         {
@@ -116,17 +167,32 @@ function toggleWindow() {
 function startMiner() {
     if (minerWorker) return; // Already running
 
-    const config = store.get('config');
+    const config = store.get('config') || {};
     if (!config.walletAddress) {
         sendToRenderer('status-update', { state: 'ERROR', message: 'No Wallet Address' });
         return;
     }
+    if (!isPlausibleBtcAddress(config.walletAddress)) {
+        sendToRenderer('status-update', { state: 'ERROR', message: 'Invalid BTC wallet address' });
+        return;
+    }
 
-    minerWorker = new Worker(path.join(__dirname, 'miner.worker.js'), {
-        workerData: config
-    });
+    let worker;
+    try {
+        worker = new Worker(path.join(__dirname, 'miner.worker.js'), {
+            workerData: config
+        });
+    } catch (err) {
+        console.error('Failed to spawn worker:', err);
+        sendToRenderer('status-update', { state: 'ERROR', message: `Failed to start miner: ${err.message}` });
+        return;
+    }
+    minerWorker = worker;
 
-    minerWorker.on('message', (msg) => {
+    worker.on('message', (msg) => {
+        // Ignore messages from a worker that has been superseded (restart race).
+        if (minerWorker !== worker) return;
+
         if (msg.type === 'hashrate') {
             // Update tooltip with hashrate if we are mining
             if (tray && !tray.isDestroyed()) {
@@ -176,18 +242,23 @@ function startMiner() {
         sendToRenderer('worker-message', msg);
     });
 
-    minerWorker.on('error', (err) => {
+    worker.on('error', (err) => {
+        if (minerWorker !== worker) return; // superseded worker
         console.error('Worker error:', err);
         sendToRenderer('status-update', { state: 'ERROR', message: err.message });
         stopMiner();
     });
 
-    minerWorker.on('exit', (code) => {
+    worker.on('exit', (code) => {
         if (code !== 0) {
             console.error(`Worker stopped with exit code ${code}`);
         }
-        minerWorker = null;
-        sendToRenderer('status-update', { state: 'IDLE' });
+        // Only react if this is still the active worker; otherwise a superseded
+        // worker's late exit would null out the new worker and flip the UI to IDLE.
+        if (minerWorker === worker) {
+            minerWorker = null;
+            sendToRenderer('status-update', { state: 'IDLE' });
+        }
     });
 
     sendToRenderer('status-update', { state: 'CONNECTING' });
@@ -195,19 +266,18 @@ function startMiner() {
 
 function stopMiner() {
     if (minerWorker) {
-        minerWorker.terminate();
+        const worker = minerWorker;
+        // Detach first so the keyed exit handler won't re-send IDLE / null a
+        // freshly-started worker during a restart.
         minerWorker = null;
+        worker.terminate();
     }
     sendToRenderer('status-update', { state: 'IDLE' });
 }
 
-function updateConfig(newConfig) {
+function updateConfig(rawConfig) {
+    const newConfig = sanitizeConfig(rawConfig);
     store.set('config', newConfig);
-
-    // Broadcast new config to all windows if needed
-    if (mainWindow) {
-        // Optional: send back to confirm
-    }
 
     // Apply Startup Setting
     // Note: This mainly works when the app is packaged as an EXE.
@@ -217,51 +287,104 @@ function updateConfig(newConfig) {
         path: app.getPath('exe')
     });
 
-    // If running, restart or update worker? For simplicity, restart if running.
+    // If running, restart so the worker picks up the new config. The keyed
+    // exit handler makes the old worker's late exit a no-op.
     if (minerWorker) {
         stopMiner();
-        startMiner(); // specific restart logic might be better but simple is OK for now
+        startMiner();
     }
 }
 
 // --- App Lifecycle ---
 
-app.whenReady().then(async () => {
-    const { default: Store } = await import('electron-store');
-    store = new Store();
-
-    // Initialize config if not exists
-    if (!store.get('config')) {
-        store.set('config', DEFAULT_CONFIG);
-    }
-
-    // Load configs and send to UI when ready - Register BEFORE window load to avoid race condition
-    ipcMain.handle('get-config', () => store.get('config'));
-
-    ipcMain.handle('save-config', (event, config) => {
-        updateConfig(config);
-        return true;
-    });
-
-    ipcMain.handle('start-miner', startMiner);
-    ipcMain.handle('stop-miner', stopMiner);
-    ipcMain.handle('get-app-version', () => app.getVersion());
-
-    ipcMain.on('resize-me', (event, { width, height }) => {
-        if (mainWindow) {
-            mainWindow.setContentSize(width, height);
+function bootstrap() {
+    app.whenReady().then(async () => {
+        try {
+            const { default: Store } = await import('electron-store');
+            store = new Store();
+        } catch (err) {
+            console.error('Failed to initialize config store:', err);
+            store = createMemoryStore({ config: { ...DEFAULT_CONFIG } });
+            try {
+                dialog.showErrorBox('Moonshot Miner', 'Could not load saved settings; running with defaults.');
+            } catch (_) { /* dialog unavailable; continue */ }
         }
-    });
 
-    createMainWindow();
-    createTray();
-});
+        // Initialize config if not exists
+        if (!store.get('config')) {
+            store.set('config', DEFAULT_CONFIG);
+        }
+
+        // Content-Security-Policy for the local renderer (defense-in-depth: the
+        // renderer loads only local files and makes no network requests itself).
+        try {
+            session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+                callback({
+                    responseHeaders: {
+                        ...details.responseHeaders,
+                        // script-src stays strict (the real XSS control). style-src
+                        // allows 'unsafe-inline' because index.html uses inline style
+                        // attributes; relaxing styles is not an injection vector here.
+                        'Content-Security-Policy': [
+                            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'"
+                        ]
+                    }
+                });
+            });
+        } catch (err) {
+            console.error('Failed to set CSP:', err);
+        }
+
+        // Register IPC handlers BEFORE window load to avoid a race condition.
+        ipcMain.handle('get-config', () => store.get('config'));
+
+        ipcMain.handle('save-config', (event, config) => {
+            updateConfig(config);
+            return true;
+        });
+
+        ipcMain.handle('start-miner', startMiner);
+        ipcMain.handle('stop-miner', stopMiner);
+        ipcMain.handle('get-app-version', () => app.getVersion());
+
+        ipcMain.on('resize-me', (event, payload) => {
+            const { width, height } = payload || {};
+            const w = Math.round(Number(width));
+            const h = Math.round(Number(height));
+            if (mainWindow && Number.isFinite(w) && Number.isFinite(h)) {
+                mainWindow.setContentSize(
+                    Math.min(2000, Math.max(200, w)),
+                    Math.min(2000, Math.max(100, h))
+                );
+            }
+        });
+
+        createMainWindow();
+        createTray();
+    }).catch((err) => {
+        console.error('Startup failed:', err);
+    });
+}
 
 app.on('window-all-closed', () => {
-    // On Windows, we typically don't quit until user says so via Tray, 
-    // but if the window is closed (destroyed) we might want to recreate it or just hide it.
-    // In our case we prevent destruction usually or just hide.
+    // On Windows/Linux we keep the tray alive; do not quit on window close.
     if (process.platform !== 'darwin') {
-        // app.quit(); // Don't quit, keep tray alive
+        // app.quit(); // Intentionally left disabled to keep the tray running.
     }
 });
+
+// Single-instance lock: an "open at login" tray app must not spawn a second
+// instance (second tray icon + second worker + duplicate pool connection).
+if (!app.requestSingleInstanceLock()) {
+    app.quit();
+} else {
+    app.on('second-instance', () => {
+        if (mainWindow) {
+            mainWindow.show();
+            mainWindow.focus();
+        } else {
+            toggleWindow();
+        }
+    });
+    bootstrap();
+}

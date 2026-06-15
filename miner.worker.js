@@ -1,6 +1,12 @@
 const { parentPort, workerData } = require('worker_threads');
-const crypto = require('crypto');
 const net = require('net');
+const {
+    sha256d,
+    reverseBuffer,
+    encodeExtraNonce2,
+    buildBlockHeader,
+    computeMerkleRoot,
+} = require('./hash-utils');
 
 // Configuration
 const POOL_HOST = 'solo.ckpool.org';
@@ -27,55 +33,10 @@ let shareIdCounter = 100;
 const CNT_MAX_TARGET = BigInt('0x00000000FFFF0000000000000000000000000000000000000000000000000000');
 let currentTarget = CNT_MAX_TARGET;
 
-// --- UTILITIES ---
-
-function sha256(buffer) {
-    return crypto.createHash('sha256').update(buffer).digest();
-}
-
-function sha256d(buffer) {
-    return sha256(sha256(buffer));
-}
-
-function reverseBuffer(buff) {
-    const reversed = Buffer.alloc(buff.length);
-    for (let i = 0; i < buff.length; i++) {
-        reversed[i] = buff[buff.length - 1 - i];
-    }
-    return reversed;
-}
-
-// Swap endianness of each 4-byte word (for Stratum prevHash format)
-function swapEndian32(buffer) {
-    const result = Buffer.alloc(buffer.length);
-    for (let i = 0; i < buffer.length; i += 4) {
-        result[i] = buffer[i + 3];
-        result[i + 1] = buffer[i + 2];
-        result[i + 2] = buffer[i + 1];
-        result[i + 3] = buffer[i];
-    }
-    return result;
-}
-
-// Encode extraNonce2 as a big-endian buffer of exactly `size` bytes.
-// Uses BigInt so the SAME encoding is shared by the coinbase build and the
-// share submission. Any divergence here makes the pool reconstruct a
-// different coinbase and reject the share.
-function encodeExtraNonce2(value, size) {
-    const buf = Buffer.alloc(size);
-    let v = BigInt(value);
-    for (let i = size - 1; i >= 0; i--) {
-        buf[i] = Number(v & 0xffn);
-        v >>= 8n;
-    }
-    return buf;
-}
-
-// Convert Hex String to Buffer (reversing if needed for little endian handling inherent in some fields)
-// But typically, Stratum hex strings are Big Endian. Internal hashing needs Little Endian.
-// We'll use specific helpers.
-
 // --- CORE MINING LOGIC ---
+// Pure hashing/serialization helpers (sha256d, reverseBuffer, swapEndian32,
+// encodeExtraNonce2, buildBlockHeader, computeMerkleRoot) live in
+// ./hash-utils.js and are unit-tested there against known block vectors.
 
 function updateTarget() {
     // Ensure difficulty is positive
@@ -108,6 +69,11 @@ function connect() {
     // mismatched coinbase before the first fresh mining.notify arrives.
     isAuthorized = false;
     currentJob = null;
+    // Reset the reconnect-in-progress flag HERE, not only in the 'connect'
+    // success callback. Otherwise a reconnect that fails at the TCP layer
+    // (error/close before 'connect') leaves isReconnecting stuck true and
+    // scheduleReconnect() short-circuits forever — auto-reconnect would die.
+    isReconnecting = false;
 
     // Clean up old socket if exists
     if (socket) {
@@ -137,6 +103,12 @@ function connect() {
 
     socket.on('data', (data) => {
         buffer += data;
+        // Defend against a pool that never sends a newline (unbounded growth).
+        if (buffer.length > 1000000) {
+            buffer = '';
+            parentPort.postMessage({ type: 'error', payload: 'Dropped oversized pool response' });
+            return;
+        }
         let idx;
         while ((idx = buffer.indexOf('\n')) !== -1) {
             const line = buffer.substring(0, idx);
@@ -146,7 +118,7 @@ function connect() {
                 const message = JSON.parse(line);
                 handleMessage(message);
             } catch (e) {
-                console.error('Parse error:', e);
+                parentPort.postMessage({ type: 'error', payload: `Pool message parse error: ${e.message}` });
             }
         }
     });
@@ -182,8 +154,8 @@ function handleMessage(msg) {
         extraNonce1 = msg.result[1];
         extraNonce2Size = msg.result[2];
 
-        if (!extraNonce1 || typeof extraNonce2Size !== 'number') {
-            parentPort.postMessage({ type: 'error', payload: 'Subscribe failed: missing extraNonce data' });
+        if (!extraNonce1 || !Number.isInteger(extraNonce2Size) || extraNonce2Size < 1 || extraNonce2Size > 8) {
+            parentPort.postMessage({ type: 'error', payload: 'Subscribe failed: invalid extraNonce data' });
             return;
         }
 
@@ -213,7 +185,10 @@ function handleMessage(msg) {
     }
 
     if (msg.method === 'mining.set_difficulty') {
-        if (msg.params && typeof msg.params[0] === 'number') {
+        // Reject non-finite / non-positive values (e.g. 1e400 -> Infinity), which
+        // would throw in updateTarget()'s BigInt conversion and be swallowed,
+        // leaving the miner comparing against a stale (easier) target.
+        if (msg.params && Number.isFinite(msg.params[0]) && msg.params[0] > 0) {
             difficulty = msg.params[0];
             updateTarget();
         }
@@ -248,6 +223,10 @@ function handleMessage(msg) {
         // We need to store them.
         try {
             const jobId = msg.params[0];
+            if (!Array.isArray(msg.params[4])) {
+                parentPort.postMessage({ type: 'error', payload: 'Invalid mining.notify: merkleBranch not an array' });
+                return;
+            }
             const prevHash = Buffer.from(msg.params[1], 'hex'); // 32 bytes
             const coinb1 = Buffer.from(msg.params[2], 'hex');
             const coinb2 = Buffer.from(msg.params[3], 'hex');
@@ -256,6 +235,14 @@ function handleMessage(msg) {
             const nbits = Buffer.from(msg.params[6], 'hex');   // 4 bytes
             const ntime = Buffer.from(msg.params[7], 'hex');   // 4 bytes
             const cleanJobs = msg.params[8];
+
+            // Buffer.from(hex) silently truncates malformed/odd-length hex; verify
+            // decoded field lengths so a bad job is rejected, not mined as garbage.
+            if (prevHash.length !== 32 || version.length !== 4 || nbits.length !== 4 ||
+                ntime.length !== 4 || !merkleBranch.every(b => b.length === 32)) {
+                parentPort.postMessage({ type: 'error', payload: 'Invalid mining.notify field lengths' });
+                return;
+            }
 
             if (cleanJobs) {
                 extraNonce2 = 0;
@@ -309,21 +296,16 @@ function calculateMerkleRoot() {
         currentJob.coinb2
     ]);
 
-    // 2. Hash Coinbase (SHA256d)
-    let merkleRoot = sha256d(coinbase);
-
-    // 3. Compute Merkle Root using branch
-    for (const branch of currentJob.merkleBranch) {
-        // Concatenate: Hash(Current + Branch)
-        merkleRoot = sha256d(Buffer.concat([merkleRoot, branch]));
-    }
-
-    return merkleRoot;
+    return computeMerkleRoot(coinbase, currentJob.merkleBranch);
 }
 
 /**
  * Main Mining Function
- * Attempts to solve the block by iterating nonces.
+ * Builds the 80-byte header once, then sweeps nonces in small chunks, yielding
+ * to the event loop (setImmediate) between chunks so incoming jobs /
+ * set_difficulty / share responses are processed promptly. The inter-cycle
+ * sleep (intensity) is applied once per full sweep, so sustained throughput
+ * matches the old single synchronous batch.
  */
 function mine() {
     if (!isMining) return;
@@ -332,107 +314,81 @@ function mine() {
         return;
     }
 
-    // 1. Prepare Header Components
-    const merkleRoot = calculateMerkleRoot();
-
-    // Stratum fields handling for Header Construction.
-    // Bitcoin Block Header (80 bytes) structure:
-    // [Version (4)] [PrevHash (32)] [MerkleRoot (32)] [Time (4)] [NBits (4)] [Nonce (4)]
-    // IMPORTANT: Stratum protocol usually sends these as Big-Endian Hex strings.
-    // Bitcoin SHA256 hashing internally treats them as Little-Endian 32-bit words (or full LE bytes).
-    // Specifically:
-    // Version: LE
-    // PrevHash: LE (Usually stratum sends this byte-swapped; if not, we must reverse). 
-    //           Usually stratum notify prevhash is already formatted such that we treat it as 8x 32-bit LE words?
-    //           Standard practice: The hex string from stratum is reversed 32-bit chunks or fully reversed.
-    //           Let's try standard Full Reverse for PrevHash and MerkleRoot which is common for "Block Hashing".
-
-    // Construct Header Buffer
-    const header = Buffer.alloc(80);
-
-    // Version: Str sent as BE hex, write as LE
-    // Actually, simple rule: Reverse the Buffer derived from the Hex string for all 32-byte fields, 
-    // and reverse the 4-byte fields if they came as BE hex.
-
-    // Version
-    reverseBuffer(currentJob.version).copy(header, 0);
-
-    // PrevHash: Stratum sends prevhash with each 4-byte word swapped.
-    // We need to swap each 4-byte chunk back to get the correct LE format for hashing.
-    const prevHashLE = swapEndian32(currentJob.prevHash);
-    prevHashLE.copy(header, 4);
-
-    // Merkle Root: sha256d output is already in the correct byte order for the header.
-    // No reversal needed - use directly.
-    merkleRoot.copy(header, 36);
-
-    // Time
-    reverseBuffer(currentJob.ntime).copy(header, 68);
-
-    // NBits
-    reverseBuffer(currentJob.nbits).copy(header, 72);
-
-    // Nonce (Placeholder at 76, 4 bytes)
-
-    // 2. Mining Loop
-    // We will scan a range of nonces.
-    // Speed depends on 'intensity' (sleep time).
-    // To make it feel "real" but "slow" as requested, we do a small batch then sleep.
-
-    const batchSize = 10000;
-    // If intensity is high (long sleep), we do a burst then sleep.
-
-    let hashCount = 0;
-    let currentNonce = Math.floor(Math.random() * 0xFFFFFFFF);
-
-    const start = Date.now();
-
-    for (let i = 0; i < batchSize; i++) {
-        hashCount++;
-        // Write Nonce (LE)
-        header.writeUInt32LE(currentNonce, 76);
-
-        // Double Hash
-        const hash = sha256d(header); // Result is 32 bytes
-
-        // Compare with Target
-        // We need to interpret the hash as a number (Little Endian usually for comparison)
-        // or just Reverse it to BE and compare with BigInt Target.
-        const hashNum = BigInt('0x' + reverseBuffer(hash).toString('hex'));
-
-        if (hashNum <= currentTarget) {
-            // FOUND A SHARE!
-            submitShare(currentJob.jobId, extraNonce2, currentJob.ntime, currentNonce);
-            // Increment extraNonce2 to generate new coinbase for next search
-            // Handle overflow based on extraNonce2Size (max value is 2^(size*8) - 1)
-            // Cap to 6 bytes (2^48) to stay within JS safe integer range
-            const safeSize = Math.min(extraNonce2Size, 6);
-            const maxExtraNonce2 = Math.pow(2, safeSize * 8) - 1;
-            extraNonce2 = (extraNonce2 + 1) % (maxExtraNonce2 + 1);
-            // Break to recalculate merkle root with new extraNonce2
-            break;
-        }
-
-        currentNonce = (currentNonce + 1) >>> 0; // Ensure logic wrap
+    // Snapshot everything the header is built from, so a job/difficulty update
+    // arriving during a setImmediate yield cannot desync the hashed header from
+    // the values we submit. Wrapped in try/catch so a malformed job posts an
+    // error instead of crashing the whole worker thread.
+    let header, jobId, ntime, en2;
+    try {
+        const merkleRoot = calculateMerkleRoot();
+        jobId = currentJob.jobId;
+        ntime = currentJob.ntime;
+        en2 = extraNonce2;
+        header = buildBlockHeader({
+            version: currentJob.version,
+            prevHash: currentJob.prevHash,
+            merkleRoot,
+            ntime,
+            nbits: currentJob.nbits,
+            nonce: 0
+        });
+    } catch (e) {
+        parentPort.postMessage({ type: 'error', payload: `Failed to build header: ${e.message}` });
+        isMining = false; // a fresh job or a reconnect will restart the loop
+        return;
     }
 
-    const end = Date.now();
+    const TARGET_HASHES = 10000;
+    const CHUNK = 2000;
+    let hashCount = 0;
+    let currentNonce = Math.floor(Math.random() * 0xFFFFFFFF);
+    const start = Date.now();
 
-    // Report SUSTAINED hashrate: the inter-batch sleep is part of real
-    // throughput, so fold it into the duration. Measuring only the compute
-    // burst inflates the displayed rate several-fold.
-    const sleepMs = intensity || 100;
-    const cycleMs = (end - start) + sleepMs;
-    const hashrate = Math.floor((hashCount / (cycleMs || 1)) * 1000);
-    parentPort.postMessage({ type: 'hashrate', payload: hashrate });
+    function reportAndSleep() {
+        // SUSTAINED hashrate: fold the inter-cycle sleep into the duration so the
+        // displayed rate reflects real throughput, not the compute burst.
+        const sleepMs = intensity || 100;
+        const cycleMs = (Date.now() - start) + sleepMs;
+        const hashrate = Math.floor((hashCount / (cycleMs || 1)) * 1000);
+        parentPort.postMessage({ type: 'hashrate', payload: hashrate });
+        setTimeout(mine, sleepMs);
+    }
 
-    // Increment ExtraNonce2 occasionally if we exhaust nonces? 
-    // For this slow miner, we just change random nonce start.
+    function runChunk() {
+        if (!isMining) return;
+        // If the job changed during a yield, abandon this stale sweep and rebuild.
+        if (!currentJob || currentJob.jobId !== jobId) {
+            setImmediate(mine);
+            return;
+        }
+        const stop = Math.min(hashCount + CHUNK, TARGET_HASHES);
+        for (; hashCount < stop; hashCount++) {
+            header.writeUInt32LE(currentNonce, 76);
+            const hash = sha256d(header); // 32 bytes
+            // Interpret the hash big-endian (reverse) and compare to the target.
+            const hashNum = BigInt('0x' + reverseBuffer(hash).toString('hex'));
+            if (hashNum <= currentTarget) {
+                // FOUND A SHARE! Submit with the SNAPSHOT values matching this header.
+                submitShare(jobId, en2, ntime, currentNonce);
+                // Advance extraNonce2 for a fresh coinbase next cycle (overflow-safe,
+                // capped to 6 bytes to stay within JS safe-integer range).
+                const safeSize = Math.min(extraNonce2Size, 6);
+                const maxExtraNonce2 = Math.pow(2, safeSize * 8) - 1;
+                extraNonce2 = (extraNonce2 + 1) % (maxExtraNonce2 + 1);
+                hashCount++;
+                reportAndSleep();
+                return;
+            }
+            currentNonce = (currentNonce + 1) >>> 0; // wrap
+        }
+        if (hashCount < TARGET_HASHES) {
+            setImmediate(runChunk); // yield so socket data is processed between chunks
+        } else {
+            reportAndSleep();
+        }
+    }
 
-    // Sleep based on intensity
-    // intensity is "sleep time in ms". 
-    // Higher intensity = Slower mining (more sleep).
-    setTimeout(mine, sleepMs);
+    runChunk();
 }
 
 function submitShare(jobId, en2Int, ntime, nonceInt) {
