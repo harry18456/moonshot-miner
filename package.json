@@ -9,7 +9,8 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder"
+    "dist": "electron-builder",
+    "test": "node test/run.js"
   },
   "keywords": [],
   "author": "harry18456",
@@ -52,7 +53,11 @@
       "!.github",
       "!*.md",
       "!LICENSE",
-      "!mk_cache"
+      "!mk_cache",
+      "!.env",
+      "!.env.*",
+      "!test",
+      "!**/*.test.js"
     ],
     "compression": "maximum",
     "asar": true,
