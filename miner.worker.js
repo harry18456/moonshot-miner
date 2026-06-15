@@ -13,6 +13,7 @@ let extraNonce1 = null;
 let extraNonce2Size = null;
 let extraNonce2 = 0;
 let isMining = false;
+let isAuthorized = false;
 let difficulty = 1;
 let reconnectTimer = null;
 let isReconnecting = false;
@@ -56,6 +57,20 @@ function swapEndian32(buffer) {
     return result;
 }
 
+// Encode extraNonce2 as a big-endian buffer of exactly `size` bytes.
+// Uses BigInt so the SAME encoding is shared by the coinbase build and the
+// share submission. Any divergence here makes the pool reconstruct a
+// different coinbase and reject the share.
+function encodeExtraNonce2(value, size) {
+    const buf = Buffer.alloc(size);
+    let v = BigInt(value);
+    for (let i = size - 1; i >= 0; i--) {
+        buf[i] = Number(v & 0xffn);
+        v >>= 8n;
+    }
+    return buf;
+}
+
 // Convert Hex String to Buffer (reversing if needed for little endian handling inherent in some fields)
 // But typically, Stratum hex strings are Big Endian. Internal hashing needs Little Endian.
 // We'll use specific helpers.
@@ -87,6 +102,13 @@ function scheduleReconnect() {
 }
 
 function connect() {
+    // Reset per-connection state; we must re-subscribe and re-authorize.
+    // Also drop the stale job: the new subscribe overwrites extraNonce1, so a
+    // leftover currentJob would let the authorize handler start mining on a
+    // mismatched coinbase before the first fresh mining.notify arrives.
+    isAuthorized = false;
+    currentJob = null;
+
     // Clean up old socket if exists
     if (socket) {
         socket.removeAllListeners();
@@ -175,10 +197,18 @@ function handleMessage(msg) {
     }
 
     if (msg.id === 2) { // Authorize
-        if (msg.result) {
+        if (msg.result === true) {
+            isAuthorized = true;
             parentPort.postMessage({ type: 'status', payload: 'Authorized' });
+            // A job may have arrived before authorization completed; start now if so.
+            if (currentJob && !isMining) {
+                parentPort.postMessage({ type: 'status', payload: 'Running (New Job)' });
+                startMiningLoop();
+            }
         } else {
-            parentPort.postMessage({ type: 'error', payload: 'Auth Failed' });
+            isAuthorized = false;
+            const reason = msg.error ? (msg.error[1] || JSON.stringify(msg.error)) : 'check wallet address';
+            parentPort.postMessage({ type: 'error', payload: `Authorization failed (${reason})` });
         }
     }
 
@@ -243,8 +273,13 @@ function handleMessage(msg) {
                 ntime
             };
 
-            parentPort.postMessage({ type: 'status', payload: 'Running (New Job)' });
-            if (!isMining) startMiningLoop();
+            // Only mine once the pool has authorized us; otherwise every share
+            // would be rejected as "unauthorized". Don't post a running status
+            // here when unauthorized, so a prior auth error stays visible.
+            if (isAuthorized) {
+                parentPort.postMessage({ type: 'status', payload: 'Running (New Job)' });
+                if (!isMining) startMiningLoop();
+            }
         } catch (e) {
             parentPort.postMessage({ type: 'error', payload: `Failed to parse job: ${e.message}` });
         }
@@ -263,19 +298,9 @@ function startMiningLoop() {
  */
 function calculateMerkleRoot() {
     // 1. Build Coinbase
-    // extraNonce2 must be padded to extraNonce2Size (bytes)
-    const en2 = Buffer.alloc(extraNonce2Size);
-
-    // Handle different extraNonce2Size values safely
-    if (extraNonce2Size >= 4) {
-        // Write 4-byte value at the end (big endian, left-padded with zeros)
-        en2.writeUInt32BE(extraNonce2 >>> 0, extraNonce2Size - 4);
-    } else {
-        // For smaller sizes, write only the least significant bytes
-        for (let i = 0; i < extraNonce2Size; i++) {
-            en2[extraNonce2Size - 1 - i] = (extraNonce2 >> (i * 8)) & 0xff;
-        }
-    }
+    // extraNonce2 padded to extraNonce2Size (bytes). Shared encoder keeps this
+    // byte-for-byte identical to what mining.submit sends.
+    const en2 = encodeExtraNonce2(extraNonce2, extraNonce2Size);
 
     const coinbase = Buffer.concat([
         currentJob.coinb1,
@@ -393,9 +418,12 @@ function mine() {
 
     const end = Date.now();
 
-    // Report Hashrate (use actual hash count, not batchSize)
-    const duration = end - start;
-    const hashrate = Math.floor((hashCount / (duration || 1)) * 1000);
+    // Report SUSTAINED hashrate: the inter-batch sleep is part of real
+    // throughput, so fold it into the duration. Measuring only the compute
+    // burst inflates the displayed rate several-fold.
+    const sleepMs = intensity || 100;
+    const cycleMs = (end - start) + sleepMs;
+    const hashrate = Math.floor((hashCount / (cycleMs || 1)) * 1000);
     parentPort.postMessage({ type: 'hashrate', payload: hashrate });
 
     // Increment ExtraNonce2 occasionally if we exhaust nonces? 
@@ -404,13 +432,13 @@ function mine() {
     // Sleep based on intensity
     // intensity is "sleep time in ms". 
     // Higher intensity = Slower mining (more sleep).
-    setTimeout(mine, intensity || 100);
+    setTimeout(mine, sleepMs);
 }
 
 function submitShare(jobId, en2Int, ntime, nonceInt) {
     // Format hex strings
-    // extraNonce2: Hex string, padded
-    const en2Hex = en2Int.toString(16).padStart(extraNonce2Size * 2, '0');
+    // extraNonce2: same big-endian bytes used to build the coinbase
+    const en2Hex = encodeExtraNonce2(en2Int, extraNonce2Size).toString('hex');
 
     // ntime: Hex string (same as received from job)
     const ntimeHex = ntime.toString('hex');
