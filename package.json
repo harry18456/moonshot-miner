@@ -51,6 +51,7 @@
       "!build_helper.bat",
       "!.git",
       "!.github",
+      "!.claude",
       "!*.md",
       "!LICENSE",
       "!mk_cache",

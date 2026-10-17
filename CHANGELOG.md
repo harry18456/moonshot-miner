@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Use the current CKPool Stratum endpoint and request share difficulty 1 after authorization.
 - Add protocol, share reconstruction, reconnect, nonce rollover, and renderer regression tests.
+- Exclude local agent settings from application installers.
 
 ## [1.0.7] - 2026-01-09
 
