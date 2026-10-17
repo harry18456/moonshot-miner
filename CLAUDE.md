@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Moonshot Miner is a lightweight, cross-platform Bitcoin solo mining application built with Electron. It runs in the system tray and mines directly to `solo.ckpool.org` using CPU-based mining. This is an educational/lottery-ticket project - CPU mining has astronomically low probability of success.
+Moonshot Miner is a lightweight, cross-platform Bitcoin solo mining application built with Electron. It runs in the system tray and mines directly to `stratum.ckpool.org` using CPU-based mining. This is an educational/lottery-ticket project - CPU mining has astronomically low probability of success.
 
 ## Commands
 
@@ -74,7 +74,7 @@ npm run dist
 ### Stratum Protocol
 
 The worker implements Stratum V1 mining protocol:
-1. TCP connect to `solo.ckpool.org:3333`
+1. TCP connect to `stratum.ckpool.org:3333`
 2. `mining.subscribe` → receive extraNonce1, extraNonce2_size
 3. `mining.authorize` with wallet address
 4. `mining.notify` → receive job (block template)

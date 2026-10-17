@@ -201,9 +201,9 @@ function startMiner() {
         } else {
             // Forward msg to Renderer
             if (msg.type === 'status') {
-                // If the payload contains "Running" or "Authorized", we consider it MINING state
+                // Authorization alone does not mean a mining job has arrived.
                 let state = 'CONNECTING';
-                if (msg.payload.includes('Running') || msg.payload.includes('Authorized')) {
+                if (msg.payload.includes('Running')) {
                     state = 'MINING';
                 } else if (msg.payload.includes('Connected')) {
                     state = 'CONNECTING';
@@ -214,25 +214,28 @@ function startMiner() {
                     tray.setToolTip(`Moonshot Miner: ${state}`);
                 }
 
-                sendToRenderer('status-update', { state: state });
+                sendToRenderer('status-update', { state: state, message: msg.payload });
             } else if (msg.type === 'error') {
                 if (tray && !tray.isDestroyed()) tray.setToolTip(`Moonshot Miner: ERROR`);
-                sendToRenderer('status-update', { state: 'ERROR', message: msg.payload });
+                sendToRenderer('status-update', { state: 'ERROR', message: msg.payload, active: true });
+            } else if (msg.type === 'share_submitted') {
+                if (tray && !tray.isDestroyed()) tray.setToolTip('Moonshot Miner: SUBMITTED');
+                sendToRenderer('status-update', { state: 'SUBMITTED', message: msg.payload });
             } else if (msg.type === 'share') {
-                if (tray && !tray.isDestroyed()) tray.setToolTip(`Moonshot Miner: SUBMITTED`);
-                sendToRenderer('status-update', { state: 'SHARE', message: msg.payload });
+                if (tray && !tray.isDestroyed()) tray.setToolTip('Moonshot Miner: ACCEPTED');
+                sendToRenderer('status-update', { state: 'ACCEPTED', message: msg.payload });
 
                 new Notification({
                     title: 'Moonshot Miner',
-                    body: `🎉 ${msg.payload}`,
+                    body: msg.payload,
                     icon: path.join(__dirname, 'icon.png')
                 }).show();
             } else if (msg.type === 'share_rejected') {
-                sendToRenderer('status-update', { state: 'ERROR', message: msg.payload });
+                sendToRenderer('status-update', { state: 'REJECTED', message: msg.payload });
 
                 new Notification({
                     title: 'Moonshot Miner',
-                    body: `⚠️ ${msg.payload}`,
+                    body: msg.payload,
                     icon: path.join(__dirname, 'icon.png')
                 }).show();
             }

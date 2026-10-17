@@ -6,6 +6,8 @@ const {
     encodeExtraNonce2,
     buildBlockHeader,
     computeMerkleRoot,
+    difficultyToTarget,
+    DIFF1_TARGET,
 } = require('../hash-utils');
 
 // Independent helpers (NOT the module's) so the buildBlockHeader test is non-circular.
@@ -71,6 +73,18 @@ module.exports = function run() {
     assert.strictEqual(encodeExtraNonce2(258, 2).toString('hex'), '0102');
     assert.strictEqual(encodeExtraNonce2(0x010203, 3).toString('hex'), '010203');
     assert.strictEqual(encodeExtraNonce2(0, 8).toString('hex'), '0000000000000000');
+    assert.strictEqual(encodeExtraNonce2(0x0102030405060708n, 8).toString('hex'), '0102030405060708');
+
+    assert.strictEqual(difficultyToTarget(1), DIFF1_TARGET);
+    assert.strictEqual(difficultyToTarget(10000), DIFF1_TARGET / 10000n);
+    assert.strictEqual(difficultyToTarget(0.5), DIFF1_TARGET * 2n);
+    assert.strictEqual(difficultyToTarget(1e-8), DIFF1_TARGET * 100000000n);
+    assert.strictEqual(difficultyToTarget(1.25), DIFF1_TARGET * 4n / 5n);
+    assert.strictEqual(difficultyToTarget(Number.MIN_VALUE), (1n << 256n) - 1n);
+    assert.strictEqual(difficultyToTarget(Number.MAX_VALUE), 0n);
+    for (const invalid of [0, -1, NaN, Infinity]) {
+        assert.throws(() => difficultyToTarget(invalid), RangeError);
+    }
 
     // 5) computeMerkleRoot: no branch == sha256d(coinbase); one branch folds right.
     const cb = Buffer.from('deadbeefcafe', 'hex');
@@ -79,5 +93,23 @@ module.exports = function run() {
     const expected = sha256d(Buffer.concat([sha256d(cb), branch]));
     assert.strictEqual(computeMerkleRoot(cb, [branch]).toString('hex'), expected.toString('hex'));
 
-    console.log('  hash-utils: KAT block #125552 verified + encoder/merkle checks passed');
+    // Actual Stratum job + accepted submission, published in the protocol docs:
+    // https://bitcointalk.org/index.php?topic=557866.0
+    // This checks wire byte order without deriving fields from a raw header.
+    const stratumCoinbase = Buffer.from(
+        '01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff20020862062f503253482f04b8864e5008' +
+        '08000002' + '00000001' +
+        '072f736c7573682f000000000100f2052a010000001976a914d23fcdf86f7e756a64a7a9688ef9903327048ed988ac00000000', 'hex');
+    const stratumHeader = buildBlockHeader({
+        version: Buffer.from('00000002', 'hex'),
+        prevHash: Buffer.from('4d16b6f85af6e2198f44ae2a6de67f78487ae5611b77c6c0440b921e00000000', 'hex'),
+        merkleRoot: computeMerkleRoot(stratumCoinbase, []),
+        ntime: Buffer.from('504e86ed', 'hex'),
+        nbits: Buffer.from('1c2ac4af', 'hex'),
+        nonce: 0xb2957c02,
+    });
+    assert.strictEqual(reverseBuffer(sha256d(stratumHeader)).toString('hex'),
+        '000000002076870fe65a2b6eeed84fa892c0db924f1482243a6247d931dcab32');
+
+    console.log('  hash-utils: mainnet + Stratum known answers, encoder, merkle and difficulty checks passed');
 };

@@ -9,6 +9,7 @@ const statusText = document.getElementById('status-text');
 const hashrateText = document.getElementById('hashrate');
 
 let isMining = false;
+let shareStatusTimer = null;
 
 // Initialize
 const minimalCheckbox = document.getElementById('minimal-mode');
@@ -30,7 +31,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
 
             if (intensityInput) {
-                intensityInput.value = config.intensity || 100;
+                intensityInput.value = config.intensity ?? 100;
                 intensityVal.innerText = intensityInput.value;
             }
 
@@ -142,17 +143,23 @@ toggleBtn.addEventListener('click', () => {
 window.api.onStatusUpdate((data) => {
     const { state, message } = data;
 
+    clearTimeout(shareStatusTimer);
+    shareStatusTimer = null;
+
     statusText.innerText = state;
     statusText.className = 'status-indicator'; // reset
-    statusText.title = '';
+    statusText.title = message || '';
+    statusText.style.color = '';
 
-    if (state === 'MINING' || state === 'CONNECTING' || state === 'SHARE') {
+    const shareResult = state === 'SUBMITTED' || state === 'ACCEPTED' || state === 'REJECTED';
+    if (data.active || state === 'MINING' || state === 'CONNECTING' || shareResult) {
         isMining = true;
         toggleBtn.innerText = 'Stop';
         toggleBtn.classList.add('active');
 
         if (state === 'MINING') statusText.classList.add('mining');
         if (state === 'CONNECTING') statusText.classList.add('connected');
+        if (state === 'ERROR') statusText.classList.add('error');
     } else {
         isMining = false;
         toggleBtn.innerText = 'Start Mining';
@@ -165,11 +172,11 @@ window.api.onStatusUpdate((data) => {
         }
     }
 
-    if (state === 'SHARE') {
-        // Show share notification without stopping mining UI
-        statusText.innerText = 'SUBMITTED';
-        statusText.style.color = '#ffd700'; // Gold
-        setTimeout(() => {
+    if (shareResult) {
+        // A rejected share does not stop the worker; keep the Stop control active.
+        if (state === 'REJECTED') statusText.classList.add('error');
+        else statusText.style.color = '#ffd700';
+        shareStatusTimer = setTimeout(() => {
             // Revert visually to mining if still mining
             if (isMining) {
                 statusText.innerText = 'MINING';

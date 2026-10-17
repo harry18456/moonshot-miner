@@ -6,10 +6,12 @@ const {
     encodeExtraNonce2,
     buildBlockHeader,
     computeMerkleRoot,
+    DIFF1_TARGET,
+    difficultyToTarget,
 } = require('./hash-utils');
 
 // Configuration
-const POOL_HOST = 'solo.ckpool.org';
+const POOL_HOST = 'stratum.ckpool.org';
 const POOL_PORT = 3333;
 const { walletAddress, intensity } = workerData;
 
@@ -17,10 +19,12 @@ let socket = null;
 let currentJob = null;
 let extraNonce1 = null;
 let extraNonce2Size = null;
-let extraNonce2 = 0;
+let extraNonce2 = 0n;
+let nextNonce = 0;
 let isMining = false;
+let miningGeneration = 0;
 let isAuthorized = false;
-let difficulty = 1;
+let nextTarget = DIFF1_TARGET;
 let reconnectTimer = null;
 let isReconnecting = false;
 
@@ -28,29 +32,16 @@ let isReconnecting = false;
 const pendingShares = new Map();
 let shareIdCounter = 100;
 
-// Stratum Difficulty 1 Target (approximate for comparison)
-// 0x00000000FFFF0000000000000000000000000000000000000000000000000000
-const CNT_MAX_TARGET = BigInt('0x00000000FFFF0000000000000000000000000000000000000000000000000000');
-let currentTarget = CNT_MAX_TARGET;
-
 // --- CORE MINING LOGIC ---
 // Pure hashing/serialization helpers (sha256d, reverseBuffer, swapEndian32,
 // encodeExtraNonce2, buildBlockHeader, computeMerkleRoot) live in
 // ./hash-utils.js and are unit-tested there against known block vectors.
 
-function updateTarget() {
-    // Ensure difficulty is positive
-    if (!difficulty || difficulty <= 0) difficulty = 1;
-    // Calculate new target based on difficulty.
-    // target = diff_1_target / difficulty
-    // To support fractional difficulty, multiply first then divide to maintain BigInt precision.
-    // E.g., difficulty 0.5 → target = CNT_MAX_TARGET * 1000 / 500
-    const scale = 1000000;
-    const scaledDiff = Math.max(1, Math.round(difficulty * scale));
-    const computed = (CNT_MAX_TARGET * BigInt(scale)) / BigInt(scaledDiff);
-    // Clamp to max valid 256-bit hash value
-    const MAX_HASH = (1n << 256n) - 1n;
-    currentTarget = computed > MAX_HASH ? MAX_HASH : computed;
+function stopMiningLoop() {
+    isMining = false;
+    // Queued callbacks from a disconnected session must never resume when a
+    // new connection flips isMining back to true.
+    miningGeneration++;
 }
 
 function scheduleReconnect() {
@@ -68,7 +59,14 @@ function connect() {
     // leftover currentJob would let the authorize handler start mining on a
     // mismatched coinbase before the first fresh mining.notify arrives.
     isAuthorized = false;
+    stopMiningLoop();
     currentJob = null;
+    extraNonce1 = null;
+    extraNonce2Size = null;
+    extraNonce2 = 0n;
+    nextNonce = 0;
+    nextTarget = DIFF1_TARGET;
+    pendingShares.clear();
     // Reset the reconnect-in-progress flag HERE, not only in the 'connect'
     // success callback. Otherwise a reconnect that fails at the TCP layer
     // (error/close before 'connect') leaves isReconnecting stuck true and
@@ -124,14 +122,14 @@ function connect() {
     });
 
     socket.on('error', (err) => {
-        isMining = false;
+        stopMiningLoop();
         parentPort.postMessage({ type: 'error', payload: err.message });
         scheduleReconnect();
     });
 
     socket.on('close', () => {
         parentPort.postMessage({ type: 'status', payload: 'Disconnected' });
-        isMining = false;
+        stopMiningLoop();
         // Clear pending shares on disconnect (jobs are now stale)
         pendingShares.clear();
         scheduleReconnect();
@@ -171,6 +169,9 @@ function handleMessage(msg) {
     if (msg.id === 2) { // Authorize
         if (msg.result === true) {
             isAuthorized = true;
+            // Request feedback suitable for a CPU only after authorization.
+            // The pool's mining.set_difficulty remains authoritative.
+            sendJson({ id: 3, method: 'mining.suggest_difficulty', params: [1] });
             parentPort.postMessage({ type: 'status', payload: 'Authorized' });
             // A job may have arrived before authorization completed; start now if so.
             if (currentJob && !isMining) {
@@ -185,12 +186,10 @@ function handleMessage(msg) {
     }
 
     if (msg.method === 'mining.set_difficulty') {
-        // Reject non-finite / non-positive values (e.g. 1e400 -> Infinity), which
-        // would throw in updateTarget()'s BigInt conversion and be swallowed,
-        // leaving the miner comparing against a stale (easier) target.
+        // Stratum difficulty changes take effect on the NEXT mining.notify.
+        // An in-flight job retains the target it was issued with.
         if (msg.params && Number.isFinite(msg.params[0]) && msg.params[0] > 0) {
-            difficulty = msg.params[0];
-            updateTarget();
+            nextTarget = difficultyToTarget(msg.params[0]);
         }
     }
 
@@ -201,13 +200,13 @@ function handleMessage(msg) {
         if (msg.result === true) {
             parentPort.postMessage({
                 type: 'share',
-                payload: `✓ Share ACCEPTED! (id: ${msg.id})`
+                payload: `Share accepted (id: ${msg.id}); this does not confirm a block reward`
             });
         } else {
             const errorMsg = msg.error ? (msg.error[1] || msg.error) : 'Unknown error';
             parentPort.postMessage({
                 type: 'share_rejected',
-                payload: `✗ Share REJECTED: ${errorMsg} (id: ${msg.id})`
+                payload: `Share rejected: ${errorMsg} (id: ${msg.id})`
             });
         }
     }
@@ -245,7 +244,8 @@ function handleMessage(msg) {
             }
 
             if (cleanJobs) {
-                extraNonce2 = 0;
+                extraNonce2 = 0n;
+                nextNonce = 0;
                 // Clear job queue if implemented, here we just switch current job
             }
 
@@ -257,7 +257,8 @@ function handleMessage(msg) {
                 merkleBranch,
                 version,
                 nbits,
-                ntime
+                ntime,
+                target: nextTarget
             };
 
             // Only mine once the pool has authorized us; otherwise every share
@@ -276,7 +277,7 @@ function handleMessage(msg) {
 function startMiningLoop() {
     if (isMining) return;
     isMining = true;
-    mine();
+    mine(++miningGeneration);
 }
 
 /**
@@ -307,12 +308,13 @@ function calculateMerkleRoot() {
  * sleep (intensity) is applied once per full sweep, so sustained throughput
  * matches the old single synchronous batch.
  */
-function mine() {
-    if (!isMining) return;
+function mine(generation) {
+    if (!isMining || generation !== miningGeneration) return;
     if (!currentJob || !extraNonce1) {
-        setTimeout(mine, 100);
+        setTimeout(() => mine(generation), 100);
         return;
     }
+    const job = currentJob;
 
     // Snapshot everything the header is built from, so a job/difficulty update
     // arriving during a setImmediate yield cannot desync the hashed header from
@@ -334,52 +336,57 @@ function mine() {
         });
     } catch (e) {
         parentPort.postMessage({ type: 'error', payload: `Failed to build header: ${e.message}` });
-        isMining = false; // a fresh job or a reconnect will restart the loop
+        stopMiningLoop(); // a fresh job or a reconnect will restart the loop
         return;
     }
 
     const TARGET_HASHES = 10000;
     const CHUNK = 2000;
     let hashCount = 0;
-    let currentNonce = Math.floor(Math.random() * 0xFFFFFFFF);
+    let currentNonce = nextNonce;
     const start = Date.now();
 
     function reportAndSleep() {
         // SUSTAINED hashrate: fold the inter-cycle sleep into the duration so the
         // displayed rate reflects real throughput, not the compute burst.
-        const sleepMs = intensity || 100;
+        const sleepMs = intensity ?? 100;
         const cycleMs = (Date.now() - start) + sleepMs;
         const hashrate = Math.floor((hashCount / (cycleMs || 1)) * 1000);
         parentPort.postMessage({ type: 'hashrate', payload: hashrate });
-        setTimeout(mine, sleepMs);
+        // Continue from the next untested nonce. Random restarts can repeat work.
+        nextNonce = currentNonce;
+        setTimeout(() => mine(generation), sleepMs);
     }
 
     function runChunk() {
-        if (!isMining) return;
+        if (!isMining || generation !== miningGeneration) return;
         // If the job changed during a yield, abandon this stale sweep and rebuild.
-        if (!currentJob || currentJob.jobId !== jobId) {
-            setImmediate(mine);
+        if (currentJob !== job) {
+            setImmediate(() => mine(generation));
             return;
         }
         const stop = Math.min(hashCount + CHUNK, TARGET_HASHES);
-        for (; hashCount < stop; hashCount++) {
+        while (hashCount < stop) {
             header.writeUInt32LE(currentNonce, 76);
             const hash = sha256d(header); // 32 bytes
             // Interpret the hash big-endian (reverse) and compare to the target.
             const hashNum = BigInt('0x' + reverseBuffer(hash).toString('hex'));
-            if (hashNum <= currentTarget) {
+            const found = hashNum <= job.target;
+            if (found) {
                 // FOUND A SHARE! Submit with the SNAPSHOT values matching this header.
                 submitShare(jobId, en2, ntime, currentNonce);
-                // Advance extraNonce2 for a fresh coinbase next cycle (overflow-safe,
-                // capped to 6 bytes to stay within JS safe-integer range).
-                const safeSize = Math.min(extraNonce2Size, 6);
-                const maxExtraNonce2 = Math.pow(2, safeSize * 8) - 1;
-                extraNonce2 = (extraNonce2 + 1) % (maxExtraNonce2 + 1);
-                hashCount++;
+            }
+            hashCount++;
+            currentNonce = (currentNonce + 1) >>> 0;
+            if (currentNonce === 0) {
+                // Exhaust the nonce space before advancing the coinbase; BigInt
+                // preserves the full extraNonce2 width (up to eight bytes).
+                extraNonce2 = (extraNonce2 + 1n) % (1n << BigInt(extraNonce2Size * 8));
+            }
+            if (found || currentNonce === 0) {
                 reportAndSleep();
                 return;
             }
-            currentNonce = (currentNonce + 1) >>> 0; // wrap
         }
         if (hashCount < TARGET_HASHES) {
             setImmediate(runChunk); // yield so socket data is processed between chunks
@@ -429,7 +436,7 @@ function submitShare(jobId, en2Int, ntime, nonceInt) {
     };
 
     sendJson(submitReq);
-    parentPort.postMessage({ type: 'share', payload: `Share submitted (id: ${shareId})` });
+    parentPort.postMessage({ type: 'share_submitted', payload: `Share submitted; awaiting pool response (id: ${shareId})` });
 }
 
 // Start

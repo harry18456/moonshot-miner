@@ -15,7 +15,7 @@ Moonshot Miner is a lightweight, cross-platform Bitcoin solo miner built with El
 
 ## ✨ Features
 
-*   **Real Stratum Protocol**: Directly connects to `solo.ckpool.org:3333`, fully adhering to the Stratum mining protocol.
+*   **Real Stratum Protocol**: Directly connects to `stratum.ckpool.org:3333` using the Stratum mining protocol.
 *   **System Tray Integration**: Runs quietly in the background. Click the tray icon to show or hide the status window.
 *   **Floating Status Window**: A frameless, semi-transparent, always-on-top window for easy monitoring.
 *   **Dynamic Resizing**: The window height adjusts automatically based on content (expanding for settings, shrinking for minimal mode).
@@ -98,6 +98,9 @@ This application uses **CPU Mining**. At current network difficulties, the proba
 This project is primarily for educational purposes and to experience the thrill of a "Moonshot" — keeping that tiny, non-zero dream of hitting the jackpot alive, just like buying a lottery ticket.
 
 ## 🐛 Troubleshooting
+
+*   **No shares yet**: The miner requests share difficulty `1` after authorization; the pool decides the actual difficulty. CKPool documents a default difficulty of `10000`. At `100,000 H/s`, the expected time per share is about 13.6 years at difficulty 10000, or 11.9 hours at difficulty 1. These are averages, not deadlines. See [CKPool's FAQ](https://solo.ckpool.org/).
+*   **Share status**: `SUBMITTED` means awaiting the pool's response; `ACCEPTED` means the pool validated a share; `REJECTED` means that share was rejected and mining continues. An accepted share alone does not confirm a Bitcoin block or payout. Lowering share difficulty changes feedback frequency, not the probability of finding a block.
 
 *   **Window Glitches**: If the window size gets stuck or displays incorrectly, try toggling the settings panel or restarting the app.
 *   **GPU Cache Error**: Statistics warnings about GPU cache in the terminal are common Electron warnings on some Windows systems and can usually be ignored.

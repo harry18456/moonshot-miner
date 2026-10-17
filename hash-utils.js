@@ -5,6 +5,26 @@
 
 const crypto = require('crypto');
 
+const DIFF1_TARGET = BigInt('0x00000000ffff0000000000000000000000000000000000000000000000000000');
+
+// Convert the pool's decimal difficulty without rounding away small fractions
+// or overflowing Number when scaling large values.
+function difficultyToTarget(difficulty) {
+    if (!Number.isFinite(difficulty) || difficulty <= 0) {
+        throw new RangeError('Difficulty must be finite and positive');
+    }
+    const [mantissa, exponent = '0'] = difficulty.toString().split('e');
+    const [whole, fraction = ''] = mantissa.split('.');
+    let numerator = BigInt(whole + fraction);
+    let denominator = 1n;
+    const power = Number(exponent) - fraction.length;
+    if (power >= 0) numerator *= 10n ** BigInt(power);
+    else denominator = 10n ** BigInt(-power);
+    const target = DIFF1_TARGET * denominator / numerator;
+    const maxHash = (1n << 256n) - 1n;
+    return target > maxHash ? maxHash : target;
+}
+
 function sha256(buffer) {
     return crypto.createHash('sha256').update(buffer).digest();
 }
@@ -73,6 +93,8 @@ function computeMerkleRoot(coinbase, merkleBranch) {
 }
 
 module.exports = {
+    DIFF1_TARGET,
+    difficultyToTarget,
     sha256,
     sha256d,
     reverseBuffer,

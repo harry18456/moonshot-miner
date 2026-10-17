@@ -5,6 +5,8 @@ const groups = [
     ['config-validation', require('./config-validation.test.js')],
     ['reconnect', require('./reconnect.test.js')],
     ['mining', require('./mining.test.js')],
+    ['stratum', require('./stratum.test.js')],
+    ['renderer', require('./renderer.test.js')],
 ];
 
 (async () => {
